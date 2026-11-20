@@ -43,6 +43,7 @@ from .testing_utils import FluxIPAdapterTesterMixin
 
 
 if is_peft_available():
+    from peft.tuners.tuners_utils import BaseTunerLayer
     from peft.utils import get_peft_model_state_dict
 
 
@@ -280,6 +281,43 @@ class TestFluxPipelineLoRA(FluxPipelineTesterConfig, LoraTesterMixin):
             msg="Loading from saved checkpoints should give same results.",
         )
         assert not torch.allclose(images_lora_with_alpha, images_lora, atol=1e-3, rtol=1e-3)
+
+    def test_kohya_lora_with_embedders_and_final_layer(self):
+        # Kohya-style Flux LoRAs can also train the embedders and the final layer. Every module's delta is
+        # `alpha / rank * lora_up @ lora_down`, and the final layer's (shift, scale) rows are swapped into the
+        # (scale, shift) order of `norm_out`.
+        pipe = self.get_pipeline().to(torch_device)
+        kohya_to_diffusers = {
+            "double_blocks_0_img_attn_proj": "transformer_blocks.0.attn.to_out.0",
+            "img_in": "x_embedder",
+            "txt_in": "context_embedder",
+            "time_in_in_layer": "time_text_embed.timestep_embedder.linear_1",
+            "vector_in_out_layer": "time_text_embed.text_embedder.linear_2",
+            "final_layer_linear": "proj_out",
+            "final_layer_adaLN_modulation_1": "norm_out.linear",
+        }
+        rank, alpha = 4, 2.0
+        state_dict = {}
+        for kohya_name, name in kohya_to_diffusers.items():
+            module = pipe.transformer.get_submodule(name)
+            state_dict[f"lora_unet_{kohya_name}.lora_down.weight"] = torch.randn(rank, module.in_features)
+            state_dict[f"lora_unet_{kohya_name}.lora_up.weight"] = torch.randn(module.out_features, rank)
+            state_dict[f"lora_unet_{kohya_name}.alpha"] = torch.tensor(alpha)
+
+        pipe.load_lora_weights(state_dict, adapter_name="kohya")
+
+        for kohya_name, name in kohya_to_diffusers.items():
+            module = pipe.transformer.get_submodule(name)
+            assert isinstance(module, BaseTunerLayer), f"The LoRA was not loaded into `{name}`."
+            lora_up = state_dict[f"lora_unet_{kohya_name}.lora_up.weight"]
+            lora_down = state_dict[f"lora_unet_{kohya_name}.lora_down.weight"]
+            expected = alpha / rank * lora_up @ lora_down
+            if name == "norm_out.linear":
+                shift, scale = expected.chunk(2, dim=0)
+                expected = torch.cat([scale, shift], dim=0)
+            assert_tensors_close(
+                module.get_delta_weight("kohya").cpu(), expected, msg=f"Wrong LoRA delta for `{name}`."
+            )
 
     def test_lora_expansion_works_for_absent_keys(self, tmp_path, base_pipe_output):
         pipe = self.get_pipeline().to(torch_device)

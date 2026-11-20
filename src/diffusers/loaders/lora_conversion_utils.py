@@ -564,39 +564,19 @@ def _convert_kohya_flux_lora_to_diffusers(state_dict):
                 f"transformer.single_transformer_blocks.{i}.norm.linear",
             )
 
-        # TODO: alphas.
-        def assign_remaining_weights(assignments, source):
-            for lora_key in ["lora_A", "lora_B"]:
-                orig_lora_key = "lora_down" if lora_key == "lora_A" else "lora_up"
-                for target_fmt, source_fmt, transform in assignments:
-                    target_key = target_fmt.format(lora_key=lora_key)
-                    source_key = source_fmt.format(orig_lora_key=orig_lora_key)
-                    value = source.pop(source_key, None)
-                    if value is None:
-                        continue
-                    if transform and lora_key == "lora_B":
-                        value = transform(value)
-                    ait_sd[target_key] = value
-
-            # Consume any leftover final_layer alpha keys so they don't
-            # reach the remaining_keys guard and cause a false "Incompatible keys" error.
-            for key in list(source.keys()):
-                if "final_layer" in key and key.endswith(".alpha"):
-                    source.pop(key)
-
         if any("guidance_in" in k for k in sds_sd):
             _convert_to_ai_toolkit(
                 sds_sd,
                 ait_sd,
                 "lora_unet_guidance_in_in_layer",
-                "time_text_embed.guidance_embedder.linear_1",
+                "transformer.time_text_embed.guidance_embedder.linear_1",
             )
 
             _convert_to_ai_toolkit(
                 sds_sd,
                 ait_sd,
                 "lora_unet_guidance_in_out_layer",
-                "time_text_embed.guidance_embedder.linear_2",
+                "transformer.time_text_embed.guidance_embedder.linear_2",
             )
 
         if any("img_in" in k for k in sds_sd):
@@ -604,7 +584,7 @@ def _convert_kohya_flux_lora_to_diffusers(state_dict):
                 sds_sd,
                 ait_sd,
                 "lora_unet_img_in",
-                "x_embedder",
+                "transformer.x_embedder",
             )
 
         if any("txt_in" in k for k in sds_sd):
@@ -612,7 +592,7 @@ def _convert_kohya_flux_lora_to_diffusers(state_dict):
                 sds_sd,
                 ait_sd,
                 "lora_unet_txt_in",
-                "context_embedder",
+                "transformer.context_embedder",
             )
 
         if any("time_in" in k for k in sds_sd):
@@ -620,13 +600,13 @@ def _convert_kohya_flux_lora_to_diffusers(state_dict):
                 sds_sd,
                 ait_sd,
                 "lora_unet_time_in_in_layer",
-                "time_text_embed.timestep_embedder.linear_1",
+                "transformer.time_text_embed.timestep_embedder.linear_1",
             )
             _convert_to_ai_toolkit(
                 sds_sd,
                 ait_sd,
                 "lora_unet_time_in_out_layer",
-                "time_text_embed.timestep_embedder.linear_2",
+                "transformer.time_text_embed.timestep_embedder.linear_2",
             )
 
         if any("vector_in" in k for k in sds_sd):
@@ -634,28 +614,25 @@ def _convert_kohya_flux_lora_to_diffusers(state_dict):
                 sds_sd,
                 ait_sd,
                 "lora_unet_vector_in_in_layer",
-                "time_text_embed.text_embedder.linear_1",
+                "transformer.time_text_embed.text_embedder.linear_1",
             )
             _convert_to_ai_toolkit(
                 sds_sd,
                 ait_sd,
                 "lora_unet_vector_in_out_layer",
-                "time_text_embed.text_embedder.linear_2",
+                "transformer.time_text_embed.text_embedder.linear_2",
             )
 
         if any("final_layer" in k for k in sds_sd):
-            # Notice the swap in processing for "final_layer".
-            assign_remaining_weights(
-                [
-                    (
-                        "norm_out.linear.{lora_key}.weight",
-                        "lora_unet_final_layer_adaLN_modulation_1.{orig_lora_key}.weight",
-                        swap_scale_shift,
-                    ),
-                    ("proj_out.{lora_key}.weight", "lora_unet_final_layer_linear.{orig_lora_key}.weight", None),
-                ],
-                sds_sd,
+            _convert_to_ai_toolkit(sds_sd, ait_sd, "lora_unet_final_layer_linear", "transformer.proj_out")
+            _convert_to_ai_toolkit(
+                sds_sd, ait_sd, "lora_unet_final_layer_adaLN_modulation_1", "transformer.norm_out.linear"
             )
+            # The original final layer orders its modulation (shift, scale), diffusers' `norm_out` (scale, shift):
+            # swap the output rows, which are lora_B's.
+            norm_out_lora_B = "transformer.norm_out.linear.lora_B.weight"
+            if norm_out_lora_B in ait_sd:
+                ait_sd[norm_out_lora_B] = swap_scale_shift(ait_sd[norm_out_lora_B])
 
         remaining_keys = list(sds_sd.keys())
         te_state_dict = {}
