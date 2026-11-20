@@ -21,6 +21,7 @@ import torch.nn as nn
 from safetensors.torch import save_file
 from transformers import CLIPTextConfig, CLIPTextModel
 
+from diffusers import UNet2DConditionModel
 from diffusers.configuration_utils import ConfigMixin
 from diffusers.loaders import StableDiffusionLoraLoaderMixin, lora_base
 from diffusers.loaders.lora_base import LoraBaseMixin
@@ -203,3 +204,44 @@ def test_load_lora_into_flattened_clip_text_encoder():
 
     torch.testing.assert_close(q_proj.lora_A["test"].weight, lora_a)
     torch.testing.assert_close(q_proj.lora_B["test"].weight, lora_b)
+
+
+@require_peft_backend
+def test_kohya_unet_attention_alphas_are_applied_per_module():
+    unet = UNet2DConditionModel(
+        block_out_channels=(4, 8),
+        layers_per_block=1,
+        sample_size=32,
+        in_channels=4,
+        out_channels=4,
+        down_block_types=("DownBlock2D", "CrossAttnDownBlock2D"),
+        up_block_types=("CrossAttnUpBlock2D", "UpBlock2D"),
+        cross_attention_dim=32,
+        norm_num_groups=2,
+    )
+    rank = 4
+    block = "lora_unet_down_blocks_1_attentions_0_transformer_blocks_0"
+
+    def kohya_module(name, alpha):
+        return {
+            f"{block}_{name}.lora_down.weight": torch.ones(rank, 8),
+            f"{block}_{name}.lora_up.weight": torch.ones(8, rank),
+            f"{block}_{name}.alpha": torch.tensor(alpha),
+        }
+
+    # Most modules have alpha 4.0, the attention projections below have alpha 1.0.
+    lora = {
+        **kohya_module("attn1_to_q", 4.0),
+        **kohya_module("attn1_to_k", 4.0),
+        **kohya_module("attn1_to_v", 4.0),
+        **kohya_module("attn1_to_out_0", 1.0),
+        **kohya_module("attn2_to_q", 1.0),
+    }
+
+    state_dict, network_alphas = StableDiffusionLoraLoaderMixin.lora_state_dict(lora)
+    StableDiffusionLoraLoaderMixin.load_lora_into_unet(state_dict, network_alphas, unet, adapter_name="test")
+
+    transformer_block = unet.down_blocks[1].attentions[0].transformer_blocks[0]
+    assert transformer_block.attn1.to_q.scaling["test"] == 4.0 / rank
+    assert transformer_block.attn1.to_out[0].scaling["test"] == 1.0 / rank
+    assert transformer_block.attn2.to_q.scaling["test"] == 1.0 / rank

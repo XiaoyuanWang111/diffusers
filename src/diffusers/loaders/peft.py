@@ -264,6 +264,9 @@ class PeftAdapterMixin:
                     network_alphas = {
                         k.removeprefix(f"{prefix}."): v for k, v in network_alphas.items() if k in alpha_keys
                     }
+                    if "lora_A" not in first_key:
+                        # The alphas are named like the state dict, so convert them to peft names the same way.
+                        network_alphas = convert_unet_state_dict_to_peft(network_alphas)
 
                 # create LoraConfig
                 adapter_config = _create_lora_config(
